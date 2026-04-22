@@ -32,7 +32,6 @@ const Question = mongoose.model('Question', questionSchema);
 const SOURCES = {
     Python: [
         process.env.PYTHON_JSON_Q1,
-        process.env.PYTHON_JSON_Q3,
         process.env.PYTHON_JSON_Q4
     ],
     AI: [
@@ -41,7 +40,7 @@ const SOURCES = {
 };
 
 // Validate that required URL env vars are present at startup
-const REQUIRED_URL_VARS = ['PYTHON_JSON_Q1', 'PYTHON_JSON_Q2', 'AI_JSON_Q1', 'URL_OPENTDB_GADGETS'];
+const REQUIRED_URL_VARS = ['PYTHON_JSON_Q1', 'PYTHON_JSON_Q4', 'AI_JSON_Q1', 'URL_OPENTDB_GADGETS'];
 REQUIRED_URL_VARS.forEach(key => {
     if (!process.env[key]) console.warn(`[ENV] Missing required URL: ${key}`);
 });
@@ -103,7 +102,6 @@ async function fetchQuestionsFromWeb(category, difficulty, limit) {
         if (category === 'Python') {
             const pythonUrls = [
                 process.env.PYTHON_JSON_Q1,
-                process.env.PYTHON_JSON_Q2,
                 process.env.PYTHON_JSON_Q4,
                 process.env.URL_OPENTDB_GADGETS
             ];
