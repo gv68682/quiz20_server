@@ -3,35 +3,48 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const axios = require('axios');
 require('dotenv').config();
-
 const app = express();
 app.use(cors());
 app.use(express.json());
-
 const PORT = process.env.PORT || 5000;
 
-// MongoDB Connection
-const MONGODB_URI = process.env.MONGODB_URI;
-mongoose.connect(MONGODB_URI)
-    .then(() => console.log('MongoDB connected'))
-    .catch(err => console.log('MongoDB connection error:', err));
+// // MongoDB Connection (if we load qqs via DB)
+// const MONGODB_URI = process.env.MONGODB_URI;
+// mongoose.connect(MONGODB_URI)
+//     .then(() => console.log('MongoDB connected'))
+//     .catch(err => console.log('MongoDB connection error:', err));
 
-// Question Schema
-const questionSchema = new mongoose.Schema({
-    text: String,
-    options: [String],
-    correctAnswer: Number,
-    category: String, // 'Python' or 'AI'
-    difficulty: String, // 'Beginner', 'Intermediate', 'Advanced'
-    explanation: String
-});
+// // Question Schema
+// const questionSchema = new mongoose.Schema({
+//     text: String,
+//     options: [String],
+//     correctAnswer: Number,
+//     category: String, // 'Python' or 'AI'
+//     difficulty: String, // 'Beginner', 'Intermediate', 'Advanced'
+//     explanation: String
+// });
 
-const Question = mongoose.model('Question', questionSchema);
+// const Question = mongoose.model('Question', questionSchema);
+
+
+const CACHE = {
+    Python: {
+        data: [],
+        lastUpdated: 0
+    },
+    AI: {
+        data: [],
+        lastUpdated: 0
+    }
+};
+const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+
 
 // External Sources URLs — all values defined in .env
 const SOURCES = {
     Python: [
         process.env.PYTHON_JSON_Q1,
+        process.env.PYTHON_JSON_Q2,
         process.env.PYTHON_JSON_Q4
     ],
     AI: [
@@ -40,7 +53,7 @@ const SOURCES = {
 };
 
 // Validate that required URL env vars are present at startup
-const REQUIRED_URL_VARS = ['PYTHON_JSON_Q1', 'PYTHON_JSON_Q4', 'AI_JSON_Q1', 'URL_OPENTDB_GADGETS'];
+const REQUIRED_URL_VARS = ['PYTHON_JSON_Q1', 'PYTHON_JSON_Q2', 'PYTHON_JSON_Q4', 'AI_JSON_Q1', 'URL_OPENTDB_GADGETS'];
 REQUIRED_URL_VARS.forEach(key => {
     if (!process.env[key]) console.warn(`[ENV] Missing required URL: ${key}`);
 });
@@ -89,12 +102,16 @@ async function fetchQuestionsFromWeb(category, difficulty, limit) {
 
     const isStrictlyPython = (text) => {
         const t = text.toLowerCase();
-        if (!t.includes('python')) return false;
-        const FORBIDDEN_KEYWORDS = ['java', 'c++', 'c#', 'php', 'javascript', 'ruby', 'rust', 'swift',
-            'objective-c', 'kotlin', 'dart', 'html', 'css', 'sql', 'fortran', 'cobol',
-            'basic', 'pascal', 'assembly'];
-        for (const word of FORBIDDEN_KEYWORDS) { if (t.includes(word)) return false; }
-        if (/\b[Cc]\b/.test(t)) return false;
+        const FORBIDDEN_KEYWORDS = [
+            'java','c++','c#','php','javascript','ruby','rust','swift',
+            'objective-c','kotlin','dart','html','css','sql',
+            'fortran','cobol','pascal','assembly'
+        ];
+        // Reject if clearly another language
+        if (FORBIDDEN_KEYWORDS.some(word => t.includes(word))) {
+            return false;
+        }
+        // Otherwise allow it
         return true;
     };
 
@@ -102,6 +119,7 @@ async function fetchQuestionsFromWeb(category, difficulty, limit) {
         if (category === 'Python') {
             const pythonUrls = [
                 process.env.PYTHON_JSON_Q1,
+                process.env.PYTHON_JSON_Q2,
                 process.env.PYTHON_JSON_Q4,
                 process.env.URL_OPENTDB_GADGETS
             ];
@@ -125,6 +143,7 @@ async function fetchQuestionsFromWeb(category, difficulty, limit) {
                             difficulty: inferDifficultyFromText(q.question)
                         }));
                     allFetched = [...allFetched, ...mapped];
+                    console.log("Fetched total:", allFetched.length);
 
                 } else if (idx === 1 && res.data.results) {
                     // OpenTDB Computer Science — URL_PYTHON_OPENTDB
@@ -207,7 +226,8 @@ async function fetchQuestionsFromWeb(category, difficulty, limit) {
 
         } else if (category === 'AI') {
             const res = await axios.get(SOURCES.AI[0], { timeout: TIMEOUT }).catch(() => null);
-            if (res && res.data && Array.isArray(res.data)) {
+            if (res && res.data) {
+                console.log("AI raw data type:", typeof res.data);
                 const quizzesObj = res.data.find(o => o.quizzes);
                 if (quizzesObj && quizzesObj.quizzes) {
                     quizzesObj.quizzes.forEach(qz => {
@@ -242,8 +262,13 @@ async function fetchQuestionsFromWeb(category, difficulty, limit) {
         }
 
         // Filter strictly by requested difficulty — NO cross-difficulty fallback
-        const filteredPool = allFetched.filter(q => q.difficulty === normalizedDifficulty);
-
+        let filteredPool;
+        if (difficulty) {
+            filteredPool = allFetched.filter(q => q.difficulty === normalizedDifficulty);
+        } else {
+            filteredPool = allFetched; // no filtering when building cache
+        }
+        console.log("After Python filter:", filteredPool.length);
         // Deduplicate within the correct difficulty tier only
         const uniquePool = [];
         const seen = new Set();
@@ -268,33 +293,81 @@ async function fetchQuestionsFromWeb(category, difficulty, limit) {
     }
 }
 
+
+async function getCachedQuestions(category, difficulty, limit) {
+    const now = Date.now();
+    const cacheEntry = CACHE[category];
+    // Refresh cache if empty or expired
+    if (!CACHE[category].data.length || (now - CACHE[category].lastUpdated > CACHE_TTL)) {
+        console.log(`[CACHE] Refreshing ${category} questions...`);
+        const freshData = await fetchQuestionsFromWeb(category, null, 100);
+        if (freshData.length) {
+            CACHE[category].data = freshData;
+            CACHE[category].lastUpdated = now;
+            console.log("Cache size:", cacheEntry.data.length);
+        } else {
+            console.warn("[CACHE] Fetch failed, keeping old cache");
+        }
+    }
+    let pool = cacheEntry.data;
+
+    // Normalize difficulty safely
+    const normalize = (s) =>
+        (s || "")
+        .toString()
+        .replace(/&quot;/g, '"')
+        .replace(/&#039;/g, "'")
+        .replace(/&amp;/g, '&')
+        .trim()
+        .toLowerCase();
+
+    let filtered = pool.filter(q =>
+        normalize(q.difficulty) === normalize(difficulty)
+    );
+
+    // 🔥 Critical fallback
+    if (filtered.length < 10) {
+        console.warn(`[CACHE] Not enough ${difficulty}, using full pool`);
+        filtered = pool;
+    }
+
+    return filtered
+        .sort(() => 0.5 - Math.random())
+        .slice(0, parseInt(limit));
+}
+
+
 // Routes
 app.get('/api/questions/random', async (req, res) => {
     const { category, difficulty, limit = 20 } = req.query;
     try {
-        const questions = await fetchQuestionsFromWeb(category || 'Python', difficulty || 'Beginner', limit);
+        const questions = await getCachedQuestions(
+            category || 'Python',
+            difficulty || 'Beginner',
+            limit
+        );
         res.json(questions);
     } catch (err) {
         res.status(500).json([]);
     }
 });
 
-// Seed Route (Mainly for manual DB injection now)
-app.post('/api/seed', async (req, res) => {
-    try {
-        const questions = req.body;
-        if (!questions || !questions.length) {
-            return res.status(400).json({ message: 'No questions provided for seeding.' });
-        }
-        if (mongoose.connection.readyState === 1) {
-            await Question.deleteMany({ category: { $in: ['Python', 'AI'] } });
-            await Question.insertMany(questions);
-        }
-        res.json({ message: 'Seeded successfully' });
-    } catch (err) {
-        res.status(500).json({ message: err.message });
-    }
-});
+// // Seed Route (Mainly for manual DB injection now)
+// app.post('/api/seed', async (req, res) => {
+//     try {
+//         const questions = req.body;
+//         if (!questions || !questions.length) {
+//             return res.status(400).json({ message: 'No questions provided for seeding.' });
+//         }
+//         if (mongoose.connection.readyState === 1) {
+//             await Question.deleteMany({ category: { $in: ['Python', 'AI'] } });
+//             await Question.insertMany(questions);
+//         }
+//         res.json({ message: 'Seeded successfully' });
+//     } catch (err) {
+//         res.status(500).json({ message: err.message });
+//     }
+// });
 
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
