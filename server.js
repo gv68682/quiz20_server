@@ -8,23 +8,28 @@ app.use(cors());
 app.use(express.json());
 const PORT = process.env.PORT || 5000;
 
-// // MongoDB Connection (if we load qqs via DB)
-// const MONGODB_URI = process.env.MONGODB_URI;
-// mongoose.connect(MONGODB_URI)
-//     .then(() => console.log('MongoDB connected'))
-//     .catch(err => console.log('MongoDB connection error:', err));
+// MongoDB Connection
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/quiz20';
+mongoose.connect(MONGODB_URI)
+    .then(() => console.log('MongoDB connected'))
+    .catch(err => console.log('MongoDB connection error:', err));
 
-// // Question Schema
-// const questionSchema = new mongoose.Schema({
-//     text: String,
-//     options: [String],
-//     correctAnswer: Number,
-//     category: String, // 'Python' or 'AI'
-//     difficulty: String, // 'Beginner', 'Intermediate', 'Advanced'
-//     explanation: String
-// });
+// Question Schema for ai_questions
+const aiQuestionSchema = new mongoose.Schema({
+    id: Number,
+    type: String,
+    question: String,
+    answer: String,
+    options: [String],
+    section: String,
+    level: String
+});
 
-// const Question = mongoose.model('Question', questionSchema);
+const AiQuestion = mongoose.model(
+    'AiQuestion',
+    aiQuestionSchema,
+    'quiz20_ai_questions'
+);
 
 
 const CACHE = {
@@ -103,9 +108,9 @@ async function fetchQuestionsFromWeb(category, difficulty, limit) {
     const isStrictlyPython = (text) => {
         const t = text.toLowerCase();
         const FORBIDDEN_KEYWORDS = [
-            'java','c++','c#','php','javascript','ruby','rust','swift',
-            'objective-c','kotlin','dart','html','css','sql',
-            'fortran','cobol','pascal','assembly'
+            'java', 'c++', 'c#', 'php', 'javascript', 'ruby', 'rust', 'swift',
+            'objective-c', 'kotlin', 'dart', 'html', 'css', 'sql',
+            'fortran', 'cobol', 'pascal', 'assembly'
         ];
         // Reject if clearly another language
         if (FORBIDDEN_KEYWORDS.some(word => t.includes(word))) {
@@ -181,7 +186,7 @@ async function fetchQuestionsFromWeb(category, difficulty, limit) {
                             // Try letter format first
                             if (ans.length === 1 && ans.toUpperCase() >= 'A' && ans.toUpperCase() <= 'Z') {
                                 correctIndex = ans.toUpperCase().charCodeAt(0) - 65;
-                            } 
+                            }
                             // Case 3: exact string match
                             else {
                                 const foundIndex = options.findIndex(opt => opt.trim() === ans);
@@ -239,7 +244,7 @@ async function fetchQuestionsFromWeb(category, difficulty, limit) {
 
                             if (title.includes('post-lecture') &&
                                 (title.includes('neural') || title.includes('time series') ||
-                                 title.includes('reinforcement') || title.includes('nlp'))) {
+                                    title.includes('reinforcement') || title.includes('nlp'))) {
                                 qzDiff = 'Advanced';
                             }
 
@@ -250,9 +255,9 @@ async function fetchQuestionsFromWeb(category, difficulty, limit) {
                                 category: 'AI',
                                 difficulty: qzDiff,
                                 explanation: `Topic: ${qz.title.replace(/Post-Lecture Quiz/i, '').replace(/: Pre-Lecture Quiz/i, '')
-                                                        .replace(/^Topic:\s*/i, '')
-                                                        .replace(/[:\-–—]+\s*$/g, '')
-                                                        .trim()}`
+                                    .replace(/^Topic:\s*/i, '')
+                                    .replace(/[:\-–—]+\s*$/g, '')
+                                    .trim()}`
                             }));
                             allFetched = [...allFetched, ...mapped];
                         }
@@ -314,12 +319,12 @@ async function getCachedQuestions(category, difficulty, limit) {
     // Normalize difficulty safely
     const normalize = (s) =>
         (s || "")
-        .toString()
-        .replace(/&quot;/g, '"')
-        .replace(/&#039;/g, "'")
-        .replace(/&amp;/g, '&')
-        .trim()
-        .toLowerCase();
+            .toString()
+            .replace(/&quot;/g, '"')
+            .replace(/&#039;/g, "'")
+            .replace(/&amp;/g, '&')
+            .trim()
+            .toLowerCase();
 
     let filtered = pool.filter(q =>
         normalize(q.difficulty) === normalize(difficulty)
@@ -348,6 +353,29 @@ app.get('/api/questions/random', async (req, res) => {
         );
         res.json(questions);
     } catch (err) {
+        res.status(500).json([]);
+    }
+});
+
+// New Route for "More AI Quiz"
+app.get('/api/questions/more-ai', async (req, res) => {
+    const { topic, level, limit = 20 } = req.query;
+    try {
+        let query = {};
+        if (topic && topic !== 'All') {
+            query.section = { $regex: topic, $options: 'i' };
+        }
+        if (level) {
+            query.level = level;
+        }
+
+        const questions = await AiQuestion.find(query);
+
+        // Shuffle the questions pool
+        const shuffled = questions.sort(() => 0.5 - Math.random());
+        res.json(shuffled.slice(0, parseInt(limit)));
+    } catch (err) {
+        console.error("Error fetching more AI questions:", err);
         res.status(500).json([]);
     }
 });
