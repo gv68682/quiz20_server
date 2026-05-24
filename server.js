@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const axios = require('axios');
+const fetch = require('node-fetch');
 require('dotenv').config();
 const app = express();
 app.use(cors());
@@ -357,6 +358,155 @@ app.get('/api/questions/random', async (req, res) => {
     }
 });
 
+// ─────────────────────────────────────────────────────────────
+//  Semantic Short-Answer Grader
+//  Model : Llama 3.1 8B Instruct (Meta) via Hugging Face
+//  Cost  : FREE — no API key required for HF public inference
+//  Deploy: Works on Vercel with zero extra environment variables
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Uses Hugging Face's free serverless inference (no API key needed)
+ * to semantically grade a short answer against the correct answer.
+ *
+ * Model: meta-llama/Meta-Llama-3.1-8B-Instruct
+ * HF free tier is rate-limited but requires no account or key.
+ *
+ * Returns { correct: true|false, feedback: string }
+ */
+async function gradeShortAnswerWithLLM(userAnswer, actualAnswer) {
+    // ── Pre-check: fast path before hitting the LLM ──────────────
+    // Handles answers like "chatbots" when correct is
+    // "Translation / Sentiment Analysis / Chatbots"
+    const normalize = s => s.trim().toLowerCase();
+    const userNorm = normalize(userAnswer);
+    const actualNorm = normalize(actualAnswer);
+
+    // 1. Exact match
+    if (userNorm === actualNorm) {
+        return { correct: true, feedback: 'Correct!' };
+    }
+
+    // 2. User answer matches one of the slash/comma-separated options
+    const actualParts = actualNorm
+        .split(/[\/,|]/)
+        .map(p => p.trim())
+        .filter(Boolean);
+
+    if (actualParts.some(part => part === userNorm || part.includes(userNorm) || userNorm.includes(part))) {
+        return { correct: true, feedback: 'Correct! That is one of the valid answers.' };
+    }
+    // ─────────────────────────────────────────────────────────────
+
+    // HF free inference router — no key needed for public models
+    const ENDPOINT = 'https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3.1-8B-Instruct';
+
+    // Llama 3 chat format expected by the HF text-generation pipeline
+    const prompt = `<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+You are a strict but fair quiz grader. Your ONLY job is to decide whether a student's short answer is semantically equivalent to the correct answer.
+Rules:
+- Minor spelling mistakes, different word order, or synonyms count as CORRECT.
+- Missing the core concept or a completely wrong meaning counts as WRONG.
+- Respond ONLY with valid JSON, no markdown, no extra text.
+Format: {"correct": true, "feedback": "one short sentence"}
+<|eot_id|><|start_header_id|>user<|end_header_id|>
+Correct answer: "${actualAnswer}"
+Student answer: "${userAnswer}"
+Is the student's answer semantically correct?
+<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+`;
+
+    try {
+        const response = await axios.post(
+            ENDPOINT,
+            {
+                inputs: prompt,
+                parameters: {
+                    max_new_tokens: 80,
+                    temperature: 0.1,       // low = deterministic grading
+                    return_full_text: false  // only return the new tokens
+                }
+            },
+            {
+                headers: { 'Content-Type': 'application/json' },
+                timeout: 20000  // HF cold-starts can be slow; 20 s is safe
+            }
+        );
+
+        // HF text-generation returns an array: [{ generated_text: "..." }]
+        const raw = (response.data?.[0]?.generated_text || '').trim();
+
+        // Extract the first {...} JSON block from the response
+        const match = raw.match(/\{[\s\S]*?\}/);
+        if (!match) throw new Error('No JSON block found in LLM response');
+
+        const parsed = JSON.parse(match[0]);
+        return {
+            correct: Boolean(parsed.correct),
+            feedback: parsed.feedback || ''
+        };
+
+    } catch (err) {
+        console.error('[LLM grader] Error:', err.message);
+
+        // ── Fallback 1: lightweight semantic check via HF zero-shot classification
+        // (facebook/bart-large-mnli — also free, no key, very reliable)
+        try {
+            const zeroShotRes = await axios.post(
+                'https://api-inference.huggingface.co/models/facebook/bart-large-mnli',
+                {
+                    inputs: `The student answered: "${userAnswer}". The correct answer is: "${actualAnswer}".`,
+                    parameters: { candidate_labels: ['correct', 'incorrect'] }
+                },
+                { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
+            );
+
+            const labels = zeroShotRes.data?.labels || [];
+            const scores = zeroShotRes.data?.scores || [];
+            const topLabel = labels[0]; // highest-scoring label is first
+            const isCorrect = topLabel === 'correct';
+
+            return {
+                correct: isCorrect,
+                feedback: isCorrect
+                    ? 'Your answer captures the correct meaning.'
+                    : 'Your answer does not match the expected concept.'
+            };
+
+        } catch (fallbackErr) {
+            console.error('[LLM grader] Fallback also failed:', fallbackErr.message);
+        }
+
+        // ── Fallback 2: exact match — quiz always keeps working
+        const exact = userAnswer.trim().toLowerCase() === actualAnswer.trim().toLowerCase();
+        return {
+            correct: exact,
+            feedback: 'Graded by exact match (semantic grading temporarily unavailable).'
+        };
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/questions/more-ai/grade-short-answer
+//  Body: { userAnswer: string, actualAnswer: string }
+//  Only used for type === 'short answer' questions in More AI Quiz
+// ─────────────────────────────────────────────────────────────
+app.post('/api/questions/more-ai/grade-short-answer', async (req, res) => {
+    const { userAnswer, actualAnswer } = req.body;
+
+    if (typeof userAnswer !== 'string' || typeof actualAnswer !== 'string') {
+        return res.status(400).json({ error: 'userAnswer and actualAnswer are required strings.' });
+    }
+
+    try {
+        const result = await gradeShortAnswerWithLLM(userAnswer, actualAnswer);
+        res.json(result); // { correct: bool, feedback: string }
+    } catch (err) {
+        console.error('[grade-short-answer] Unexpected error:', err);
+        res.status(500).json({ error: 'Grading failed.' });
+    }
+});
+
 // New Route for "More AI Quiz"
 app.get('/api/questions/more-ai', async (req, res) => {
     const { topic, level, limit = 20 } = req.query;
@@ -379,6 +529,7 @@ app.get('/api/questions/more-ai', async (req, res) => {
         res.status(500).json([]);
     }
 });
+
 
 // // Seed Route (Mainly for manual DB injection now)
 // app.post('/api/seed', async (req, res) => {
