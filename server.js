@@ -387,13 +387,24 @@ async function gradeShortAnswerWithLLM(userAnswer, actualAnswer) {
     }
 
     // 2. User answer matches one of the slash/comma-separated options
+    //    Guard: must be at least 3 chars and a whole-word match to avoid "t" matching "text"
     const actualParts = actualNorm
         .split(/[\/,|]/)
         .map(p => p.trim())
         .filter(Boolean);
 
-    if (actualParts.some(part => part === userNorm || part.includes(userNorm) || userNorm.includes(part))) {
-        return { correct: true, feedback: 'Correct! That is one of the valid answers.' };
+    if (userNorm.length >= 3) {
+        const isPartMatch = actualParts.some(part => {
+            // Exact part match, or user answer fully contains the part (or vice versa)
+            // but only when the overlap is a whole word, not a stray letter
+            if (part === userNorm) return true;
+            // part contains userNorm as a whole word
+            const wordBoundary = new RegExp(`\\b${userNorm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+            return wordBoundary.test(part);
+        });
+        if (isPartMatch) {
+            return { correct: true, feedback: 'Correct! That is one of the valid answers.' };
+        }
     }
     // ─────────────────────────────────────────────────────────────
 
