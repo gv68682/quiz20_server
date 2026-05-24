@@ -2,7 +2,6 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const axios = require('axios');
-const fetch = require('node-fetch');
 require('dotenv').config();
 const app = express();
 app.use(cors());
