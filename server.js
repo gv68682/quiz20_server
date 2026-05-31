@@ -343,6 +343,9 @@ async function getCachedQuestions(category, difficulty, limit) {
 
 
 // Routes
+const cloudRouter = require('./cloudq');
+app.use('/api', cloudRouter);
+
 app.get('/api/questions/random', async (req, res) => {
     const { category, difficulty, limit = 20 } = req.query;
     try {
